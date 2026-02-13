@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>無人島サバイバル - バグ修正完了版</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        :root { --bg: #0d1117; --panel: #161b22; --text: #58a6ff; --accent: #1f6feb; --danger: #f85149; --thief: #a371f7; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: #c9d1d9; padding: 20px; }
+        .container { max-width: 900px; margin: auto; background: var(--panel); padding: 25px; border-radius: 12px; border: 1px solid #30363d; }
+        .btn { padding: 10px 18px; margin: 4px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; background: #21262d; color: #c9d1d9; border: 1px solid #f0f6fc1a; transition: 0.2s; }
+        .btn:hover { background: #30363d; border-color: #8b949e; }
+        .btn:disabled { opacity: 0.3; cursor: not-allowed; pointer-events: none; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-success { background: #238636; color: white; }
+        .btn-thief { background: var(--thief); color: white; }
+        .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        .card { background: #0d1117; padding: 15px; border-radius: 8px; border: 1px solid #30363d; position: relative; }
+        .card.my-turn { border: 2px solid var(--text); }
+        .card.faction-thief { border-left: 5px solid var(--thief); }
+        .card.dead { opacity: 0.5; background: #21262d; }
+        .log-container { background: #000; height: 200px; overflow-y: scroll; padding: 12px; text-align: left; font-family: 'Consolas', monospace; border-radius: 6px; border: 1px solid #30363d; color: #7ee787; margin: 15px 0; font-size: 0.85em; }
+        .badge { font-size: 0.75em; padding: 2px 8px; border-radius: 10px; background: var(--accent); color: white; }
+        .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 100; justify-content: center; align-items: center; }
+        .modal { background: var(--panel); padding: 25px; border-radius: 10px; width: 90%; max-width: 500px; border: 1px solid var(--accent); }
+        .result-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .result-table th, .result-table td { border: 1px solid #30363d; padding: 8px; text-align: center; }
+        .result-table th { background: #21262d; }
+        input[type="text"], input[type="number"] { padding: 8px; border-radius: 4px; background: #0d1117; color: white; border: 1px solid #30363d; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🏝️ Island Survival</h1>
+    
+    <div id="setup-ui">
+        <p>Status: <strong id="conn-status" style="color:orange;">Initializing...</strong></p>
+        <p>Your ID: <strong id="my-id" style="color:var(--text);">---</strong></p>
+        
+        <div style="margin-bottom: 20px;">
+            <label>名前: <input type="text" id="username" value="Player" style="width: 150px;"></label>
+        </div>
+
+        <div id="connection-controls">
+            <button class="btn" onclick="initHost()">部屋を作る(Host)</button>
+            <input type="text" id="join-id" placeholder="Host IDを入力">
+            <button class="btn" onclick="initGuest()">参加する(Guest)</button>
+        </div>
+        <div id="lobby-list" style="margin-top:20px; color:#8b949e;"></div>
+        <button id="start-btn" class="btn btn-success" style="display:none; width:100%; margin-top:15px;" onclick="startGame()">サバイバル開始</button>
+    </div>
+
+    <div id="game-ui" style="display:none;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div><h2 id="day-label" style="display:inline;">Day 1</h2><span id="my-faction-badge" class="badge" style="margin-left:10px;">役職確認中</span></div>
+            <div id="phase-label" class="badge">ACTION PHASE</div>
+        </div>
+
+        <div class="status-grid" id="status-grid"></div>
+        <div class="log-container" id="local-log"></div>
+
+        <div id="action-panel" style="display:none;">
+            <p><strong>💎 宝探し</strong> (強靭な身体: 失敗率半減)</p>
+            <button class="btn" onclick="sendAction('treasure', 0.2, 0)">ちょっと(0.2/0%)</button>
+            <button class="btn" onclick="sendAction('treasure', 0.4, 20)">普通(0.4/20%)</button>
+            <button class="btn" onclick="sendAction('treasure', 0.6, 40)">かなり(0.6/40%)</button>
+            <button class="btn" onclick="sendAction('treasure', 0.8, 60)">最大限(0.8/60%)</button>
+            <p><strong>🎣 釣り・他</strong></p>
+            <button class="btn btn-success" onclick="sendAction('fish')">釣り(1-3個)</button>
+            <button class="btn" onclick="openOverlay('spy')">監視する</button>
+            <button class="btn" onclick="sendAction('ability')">特殊能力を得る</button>
+            <div id="thief-traps" style="display:none; border:1px solid var(--thief); padding:10px; margin-top:10px; border-radius:8px;">
+                <p style="color:var(--thief); margin-top:0;">🕵️ 盗賊専用罠</p>
+                <button id="trap-food_terror" class="btn btn-thief" onclick="sendAction('trap', 'food_terror')">飯テロ</button>
+                <button id="trap-leg_trap" class="btn btn-thief" onclick="sendAction('trap', 'leg_trap')">トラバサミ</button>
+                <button id="trap-theft" class="btn btn-thief" onclick="openOverlay('theft')">窃盗</button>
+                <button id="trap-extra_food" class="btn btn-thief" onclick="sendAction('trap', 'extra_food')">追加食料</button>
+            </div>
+        </div>
+
+        <div id="rest-panel" style="display:none;"><p style="color:orange;">行動不能</p><button class="btn" onclick="sendAction('skip')">休息する</button></div>
+
+        <div id="interaction-panel" style="display:none;">
+            <h3>🤝 交流・殺害・投票</h3>
+            <div id="trade-ui">
+                相手: <select id="give-to"></select>
+                物資: <select id="give-item"><option value="food">食料</option><option value="treasure">宝</option></select>
+                量: <input type="number" id="give-val" value="1" min="0.1" step="0.1" style="width:50px;">
+                <button class="btn" onclick="performGive()">譲渡</button>
+            </div>
+            <div id="kill-ui" style="display:none; margin-top:10px;"><span style="color:var(--danger)">💀 殺害:</span> <select id="kill-to"></select> <button id="kill-btn" class="btn btn-danger" onclick="performKill()">実行</button></div>
+            <div id="vote-section" style="background:rgba(248,81,73,0.1); padding:10px; border-radius:5px; margin-top:10px;">対象: <select id="vote-to"></select> <button class="btn btn-danger" onclick="performVote()">追放投票</button></div>
+            <button id="ready-btn" class="btn btn-success" style="width:100%; margin-top:15px;" onclick="markReady()">翌日へ</button>
+        </div>
+
+        <div id="result-panel" style="display:none;">
+            <h2 id="victory-msg"></h2>
+            <div id="score-breakdown" style="font-size:1.1em; color:var(--text);"></div>
+            <table class="result-table" id="final-table">
+                <thead><tr><th>名前</th><th>陣営</th><th>状態</th><th>食料</th><th>宝</th><th>能力</th></tr></thead>
+                <tbody id="final-body"></tbody>
+            </table>
+            <button class="btn" style="margin-top:20px;" onclick="location.reload()">タイトルへ</button>
+        </div>
+    </div>
+</div>
+
+<div id="spy-overlay" class="overlay"><div class="modal"><h3>監視対象</h3><div id="spy-list"></div><button class="btn" onclick="closeOverlay()">戻る</button></div></div>
+<div id="theft-overlay" class="overlay"><div class="modal"><h3>窃盗対象</h3><div id="theft-list"></div><button class="btn" onclick="closeOverlay()">戻る</button></div></div>
+
+<script>
+    const ABILITIES = ["強靭な身体", "半魚人への覚醒", "ベテラン", "釣り職人", "失敗保険", "ストーカー体質", "ゾンビ", "ギブアンドテイク"];
+    let peer = new Peer({ host: '0.peerjs.com', port: 443, secure: true, debug: 1 });
+    let myId, connections = [], hostConn = null, isHost = false;
+    let gameState = { 
+        players: [], day: 1, phase: 'setup', turnIdx: 0, 
+        traps: { foodTerror: false, legTrap: false, nextLegTrap: false },
+        trapUsed: { food_terror: false, leg_trap: false, theft: false, extra_food: false },
+        pendingThefts: [], history: [], gameEnded: false,
+        resultData: null
+    };
+
+    peer.on('open', id => { myId = id; document.getElementById('my-id').innerText = id; document.getElementById('conn-status').innerText = "Online"; document.getElementById('conn-status').style.color = "#7ee787"; });
+    peer.on('connection', conn => { if (isHost) { connections.push(conn); conn.on('data', d => handleData(d, conn)); } });
+
+    function initHost() { 
+        isHost = true; 
+        const name = document.getElementById('username').value || "Host";
+        addPlayer(myId, name); 
+        document.getElementById('start-btn').style.display = 'block'; 
+        document.getElementById('connection-controls').style.display = 'none'; 
+    }
+    function initGuest() { 
+        const tid = document.getElementById('join-id').value; 
+        const name = document.getElementById('username').value || "Guest";
+        if(!tid) return; 
+        hostConn = peer.connect(tid); 
+        hostConn.on('open', () => { 
+            document.getElementById('connection-controls').style.display = 'none'; 
+            hostConn.send({ type: 'join', name: name }); 
+        }); 
+        hostConn.on('data', d => handleData(d)); 
+    }
+    
+    function sync() { if (isHost) connections.forEach(c => c.send({ type: 'sync', state: gameState })); handleData({ type: 'sync', state: gameState }); }
+
+    function handleData(data, conn) {
+        if (isHost && data.type === 'join') { addPlayer(conn.peer, data.name); sync(); }
+        if (data.type === 'sync') { gameState = data.state; updateUI(); }
+        if (isHost) {
+            if (data.type === 'action') processAction(data);
+            if (data.type === 'ready') { const p = gameState.players.find(x => x.id === data.pId); if(p) p.ready = true; checkPhaseEnd(); }
+            if (data.type === 'give') {
+                const f = gameState.players.find(x => x.id === data.from); const t = gameState.players.find(x => x.id === data.to);
+                const item = data.item || 'food';
+                if(f[item] >= data.val) { 
+                    f[item] -= data.val; t[item] += data.val; 
+                    const itemLabel = item === 'food' ? '食料' : '宝';
+                    pushLog(`${f.name}が${t.name}へ${itemLabel}を${data.val.toFixed(1)}譲渡`, "#58a6ff"); sync(); 
+                }
+            }
+            if (data.type === 'kill') {
+                const f = gameState.players.find(x => x.id === data.from); const t = gameState.players.find(x => x.id === data.to);
+                if (!f.killedToday) { 
+                    f.killedToday = true;
+                    if (t.ability === "強靭な身体") {
+                         pushLog(`💀 ${f.name}が${t.name}を襲ったが、強靭な肉体が刃を弾いた！`, "#f85149");
+                    } else {
+                        t.alive = false; 
+                        if (f.ability === "ゾンビ") f.food += 2;
+                        if (f.ability === "ギブアンドテイク") { f.food += 1; f.treasure += 0.6; }
+                        pushLog(`💀 事件：${f.name}が${t.name}を殺害した`, "#f85149"); 
+                    }
+                    sync(); 
+                }
+            }
+            if (data.type === 'vote') {
+                const target = gameState.players.find(x => x.id === data.to);
+                if (target.faction === 'thief') { pushLog(`🎯 追放成功！${target.name}は盗賊だった。`, "gold"); finishGame("research_win_vote"); }
+                else { pushLog(`🚫 追放失敗... ${target.name}は無実だった。`, "red"); finishGame("thief_win_vote"); }
+            }
+        }
+    }
+
+    function addPlayer(id, name, cpu = false) {
+        if(gameState.players.find(p => p.id === id)) return;
+        gameState.players.push({ 
+            id, name, isCPU: cpu, food: 3, treasure: 0, ap: 1, 
+            ability: "なし", alive: true, ready: false, faction: 'research', 
+            lastAction: "未行動", yesterdayAction: "未行動", failFlag: false, killedToday: false,
+            veteranActive: false, veteranNext: false, stalkerTarget: null, reviveTimer: 0, canRevive: true
+        });
+        document.getElementById('lobby-list').innerText = "参加者: " + gameState.players.map(p => p.name).join(", ");
+    }
+
+    function startGame() {
+        while (gameState.players.length < 4) addPlayer("CPU"+Math.random(), "CPU-"+(gameState.players.length+1), true);
+        gameState.players[Math.floor(Math.random() * gameState.players.length)].faction = 'thief';
+        gameState.phase = 'action'; pushLog("=== ゲーム開始 ===", "gold"); sync();
+    }
+
+    function processAction(data) {
+        const pId = data.playerId || gameState.players[gameState.turnIdx].id;
+        const p = gameState.players.find(x => x.id === pId);
+
+        if (data.action === 'skip') { nextTurn(); return; }
+        p.ap = 0;
+        
+        if (data.action === 'treasure') {
+            let fp = data.prob; 
+            if (gameState.traps.legTrap) fp *= 2; 
+            if (p.ability === "強靭な身体") fp /= 2;
+            
+            if (Math.random() * 100 < fp) { 
+                p.failFlag = true; p.lastAction = "大失敗"; 
+                let failMsg = `${p.name}が宝探しで大失敗した`;
+                if (p.ability === "失敗保険") { p.treasure += 0.2; failMsg += " (保険適用 宝+0.2)"; }
+                pushLog(failMsg, "#f85149", p.id); 
+            } else { 
+                let gain = data.val;
+                if (p.veteranActive) { gain *= 2; }
+                p.treasure += gain; 
+                if (p.ability === "ベテラン" && gain >= 0.6) { p.veteranNext = true; }
+                p.lastAction = "宝探し"; 
+                pushLog(`${p.name}は宝を入手した${p.veteranActive ? '(ベテランx2)':''}`, "#7ee787", p.id); 
+            }
+        } else if (data.action === 'fish') {
+            if (p.ability === "半魚人への覚醒") {
+                if (Math.random() < 0.67) {
+                    p.alive = false;
+                    pushLog(`${p.name}は半魚人への覚醒に失敗して死亡した`, "red");
+                    if (isHost) sync(); // 死亡時即同期
+                    nextTurn(); return; 
+                } else {
+                    p.ability = "半魚人";
+                    pushLog(`${p.name}は半魚人に覚醒した！`, "#58a6ff", p.id);
+                }
+            }
+            let count = Math.floor(Math.random()*3)+1;
+            if (p.ability === "釣り職人") count += 1;
+            if (p.ability === "半魚人") count *= 2;
+            p.food += count; p.lastAction = "釣り"; 
+            pushLog(`${p.name}は魚を${count}匹釣った`, "#7ee787", p.id);
+
+        } else if (data.action === 'ability') {
+            if (p.ability === "ストーカー体質") p.stalkerTarget = null;
+            p.ability = ABILITIES[Math.floor(Math.random()*ABILITIES.length)]; 
+            p.lastAction = "能力変更"; 
+            pushLog(`能力【${p.ability}】を得た`, "#7ee787", p.id);
+
+        } else if (data.action === 'spy') {
+            let targetIdx = data.val;
+            if (p.ability === "ストーカー体質") {
+                if (p.stalkerTarget !== null) {
+                    targetIdx = gameState.players.findIndex(x => x.id === p.stalkerTarget);
+                    pushLog(`ストーカー体質により対象を変更できません`, "orange", p.id);
+                } else {
+                    p.stalkerTarget = gameState.players[targetIdx].id;
+                }
+            }
+            const t = gameState.players[targetIdx]; 
+            p.lastAction = "監視";
+            let act = (t.yesterdayAction === "釣り" || t.yesterdayAction === "宝探し") ? t.yesterdayAction : "不明";
+            pushLog(`👁️ 監視[${t.name}]: 食料${t.food.toFixed(1)} 宝${t.treasure.toFixed(1)} 昨日:${act}`, "#58a6ff", p.id);
+
+        } else if (data.action === 'trap') {
+            gameState.trapUsed[data.val] = true;
+            if (data.val === 'food_terror') gameState.traps.foodTerror = true;
+            else if (data.val === 'leg_trap') gameState.traps.nextLegTrap = true;
+            else if (data.val === 'extra_food') p.food += 4;
+            else if (data.val === 'theft') { 
+                gameState.pendingThefts.push({ thiefId: p.id, targetIdx: data.prob.targetIdx });
+                pushLog(`窃盗の罠を仕掛けた...`, "#a371f7", p.id);
+            }
+            p.lastAction = "罠設置";
+            if (data.val !== 'theft') pushLog(`罠を仕掛けた`, "#a371f7", p.id);
+        }
+        
+        // 修正ポイント: アクション完了時に必ず同期してログを配信する
+        if (isHost) sync();
+        
+        nextTurn();
+    }
+
+    function nextTurn() {
+        while (true) {
+            gameState.turnIdx++;
+            if (gameState.turnIdx >= gameState.players.length) {
+                gameState.phase = 'interaction';
+                gameState.players.forEach(p => p.ready = (p.isCPU || !p.alive));
+                sync();
+                return; 
+            }
+            const n = gameState.players[gameState.turnIdx];
+            if (n.alive && n.ap > 0) {
+                if (n.isCPU) setTimeout(() => cpuMove(n), 400);
+                else sync();
+                break;
+            }
+        }
+    }
+
+    function checkPhaseEnd() { if (gameState.players.every(p => p.ready)) endDay(); else sync(); }
+
+    function endDay() {
+        gameState.pendingThefts.forEach(th => {
+            const thief = gameState.players.find(x => x.id === th.thiefId);
+            const target = gameState.players[th.targetIdx];
+            if (thief && target && thief.alive && target.alive) {
+                 let s = Math.min(target.treasure, 0.4);
+                 target.treasure -= s; 
+                 thief.treasure += s;
+                 pushLog(`昨晩、${target.name}から${s.toFixed(1)}のお宝を盗み出した`, "#a371f7", thief.id);
+                 pushLog(`昨晩、何者かにお宝(${s.toFixed(1)})を盗まれた！`, "#f85149", target.id);
+            }
+        });
+        gameState.pendingThefts = [];
+
+        gameState.players.forEach(p => {
+            if (!p.alive && p.reviveTimer > 0) {
+                p.reviveTimer--;
+                if (p.reviveTimer === 0) {
+                    p.alive = true; p.food = 1; p.ap = 1;
+                    pushLog(`🧟 ${p.name}が墓場から蘇った...`, "#a371f7");
+                }
+            }
+        });
+
+        gameState.players.forEach(p => {
+            if (!p.alive) return; 
+
+            if (p.ability === "ストーカー体質" && p.stalkerTarget) {
+                const t = gameState.players.find(x => x.id === p.stalkerTarget);
+                if (t && t.alive) {
+                    let act = (t.yesterdayAction === "釣り" || t.yesterdayAction === "宝探し") ? t.yesterdayAction : "不明";
+                    pushLog(`👁️ ストーカー通信[${t.name}]: 食料${t.food.toFixed(1)} 宝${t.treasure.toFixed(1)} 昨日:${act}`, "#58a6ff", p.id);
+                }
+            }
+
+            let con = (p.ability === "強靭な身体") ? 1.5 : 1.0; 
+            if (gameState.traps.foodTerror) con += 1.0; 
+            p.food -= con; 
+            
+            if (p.food < 0) { 
+                p.alive = false; pushLog(`${p.name}が餓死した`, "red"); 
+            } else {
+                if (p.ability === "ゾンビ" && Math.random() < 0.30) {
+                    p.alive = false;
+                    pushLog(`🧟 ${p.name}は体が崩れ落ちて死亡した(ゾンビ効果)`, "red");
+                    if (p.canRevive) { p.reviveTimer = 2; p.canRevive = false; } 
+                }
+            }
+        });
+
+        if (gameState.day >= 10) return finishGame("timeup");
+        gameState.day++; gameState.phase = 'action'; gameState.turnIdx = -1; 
+        gameState.traps.foodTerror = false; gameState.traps.legTrap = gameState.traps.nextLegTrap; gameState.traps.nextLegTrap = false;
+        
+        gameState.players.forEach(p => { 
+            p.yesterdayAction = p.lastAction; p.lastAction = "未行動"; p.ready = false; p.killedToday = false; 
+            p.veteranActive = p.veteranNext; p.veteranNext = false; 
+            if (p.alive) { p.ap = p.failFlag ? 0 : 1; p.failFlag = false; } 
+        });
+        
+        nextTurn();
+    }
+
+    function finishGame(reason) {
+        let surRes = 0, resTr = 0;
+        gameState.players.forEach(p => { if (p.faction === 'research' && p.alive) { surRes++; resTr += p.treasure; } });
+        let score = (surRes * 10) + (resTr * 6);
+        let win = (reason === "research_win_vote") || (score >= 50);
+        let msg = win ? "🎉 調査隊の勝利！" : "💀 盗賊の勝利！";
+
+        gameState.resultData = {
+            msg: msg,
+            score: score.toFixed(1),
+            players: gameState.players
+        };
+        gameState.phase = 'result';
+        sync();
+    }
+
+    function updateUI() {
+        if (gameState.phase === 'setup') return;
+        document.getElementById('setup-ui').style.display = 'none'; document.getElementById('game-ui').style.display = 'block';
+        document.getElementById('day-label').innerText = "Day " + gameState.day;
+        const me = gameState.players.find(x => x.id === myId);
+        document.getElementById('my-faction-badge').innerText = me.faction === 'thief' ? "🕵️ 盗賊" : "🔍 調査隊";
+        document.getElementById('my-faction-badge').style.background = me.faction === 'thief' ? "var(--thief)" : "var(--accent)";
+
+        if (gameState.phase !== 'result') {
+            document.getElementById('result-panel').style.display = 'none';
+            const grid = document.getElementById('status-grid'); grid.innerHTML = "";
+            gameState.players.forEach((p, i) => {
+                const isMe = p.id === myId; const act = (gameState.phase === 'action' && i === gameState.turnIdx);
+                let statusText = isMe ? `🍖:${p.food.toFixed(1)} 💎:${p.treasure.toFixed(1)}<br><small>${p.ability}</small>` : `🍖:?? 💎:??<br><small>能力:??</small>`;
+                if (!p.alive && p.reviveTimer > 0) statusText += `<br><span style='color:#a371f7'>蘇生待機: ${p.reviveTimer}日</span>`;
+                
+                grid.innerHTML += `<div class="card ${act ? 'my-turn' : ''} ${p.alive ? '' : 'dead'}">
+                    <strong>${p.name}</strong> ${p.ready ? '✅' : ''}<br>${p.alive ? '❤️ 生存' : '💀 死亡'}<br>
+                    ${statusText}
+                </div>`;
+            });
+        }
+
+        document.getElementById('local-log').innerHTML = gameState.history.filter(h => h.isPublic || h.owner === myId).map(h => `<div style="color:${h.color}">[Day${h.day}] ${h.msg}</div>`).join("");
+        document.getElementById('local-log').scrollTop = 99999;
+
+        const isTurn = (gameState.phase === 'action' && gameState.players[gameState.turnIdx].id === myId);
+        document.getElementById('action-panel').style.display = (isTurn && me.alive && me.ap > 0) ? 'block' : 'none';
+        document.getElementById('rest-panel').style.display = (isTurn && (!me.alive || me.ap <= 0)) ? 'block' : 'none';
+        document.getElementById('thief-traps').style.display = (me.faction === 'thief') ? 'block' : 'none';
+        if(me.faction === 'thief') ['food_terror', 'leg_trap', 'theft', 'extra_food'].forEach(t => document.getElementById('trap-'+t).disabled = gameState.trapUsed[t]);
+
+        const intPanel = document.getElementById('interaction-panel');
+        if (gameState.phase === 'interaction' && me.alive) {
+            intPanel.style.display = 'block';
+            const gTo = document.getElementById('give-to'), kTo = document.getElementById('kill-to'), vTo = document.getElementById('vote-to');
+            gTo.innerHTML = kTo.innerHTML = vTo.innerHTML = "";
+            gameState.players.forEach(p => { if(p.id !== myId && p.alive) { const o = `<option value="${p.id}">${p.name}</option>`; gTo.innerHTML += o; kTo.innerHTML += o; vTo.innerHTML += o; } });
+            document.getElementById('kill-ui').style.display = (me.ability === "ゾンビ" || me.ability === "ギブアンドテイク") ? 'block' : 'none';
+            document.getElementById('kill-btn').disabled = me.killedToday;
+        } else intPanel.style.display = 'none';
+
+        if (gameState.phase === 'result' && gameState.resultData) {
+            const rd = gameState.resultData;
+            document.getElementById('victory-msg').innerText = rd.msg;
+            document.getElementById('score-breakdown').innerText = `最終スコア: ${rd.score}`;
+            const body = document.getElementById('final-body'); body.innerHTML = "";
+            rd.players.forEach(p => {
+                body.innerHTML += `<tr><td>${p.name}</td><td>${p.faction==='thief'?'盗賊':'調査隊'}</td><td>${p.alive?'生存':'死亡'}</td><td>${p.food.toFixed(1)}</td><td>${p.treasure.toFixed(1)}</td><td>${p.ability}</td></tr>`;
+            });
+            document.getElementById('result-panel').style.display = 'block';
+            document.getElementById('action-panel').style.display = 'none';
+            document.getElementById('interaction-panel').style.display = 'none';
+        }
+    }
+
+    function pushLog(msg, color, owner = null) { gameState.history.push({ day: gameState.day, msg, color, owner, isPublic: (owner === null) }); }
+    function sendAction(type, v1, v2) { const p = { type: 'action', playerId: myId, action: type, val: v1, prob: v2 }; if (isHost) processAction(p); else hostConn.send(p); closeOverlay(); }
+    function markReady() { if (isHost) { gameState.players.find(x => x.id === myId).ready = true; checkPhaseEnd(); } else hostConn.send({ type: 'ready', pId: myId }); }
+    function performGive() { 
+        const v = parseFloat(document.getElementById('give-val').value); 
+        const item = document.getElementById('give-item').value;
+        const to = document.getElementById('give-to').value;
+        const p = { type: 'give', from: myId, to, item, val: v };
+        if (isHost) handleData(p); else hostConn.send(p); 
+    }
+    function performKill() { if (isHost) handleData({ type: 'kill', from: myId, to: document.getElementById('kill-to').value }); else hostConn.send({ type: 'kill', from: myId, to: document.getElementById('kill-to').value }); }
+    function performVote() { if (isHost) handleData({ type: 'vote', to: document.getElementById('vote-to').value }); else hostConn.send({ type: 'vote', to: document.getElementById('vote-to').value }); }
+    function cpuMove(c) { processAction({ action: c.food < 2 ? 'fish' : 'treasure', val: 0.4, prob: 20, playerId: c.id }); }
+    function openOverlay(id) { 
+        document.getElementById(id + '-overlay').style.display = 'flex'; const list = document.getElementById(id + '-list'); list.innerHTML = ""; 
+        gameState.players.forEach((p, i) => { if (p.id !== myId && p.alive) { 
+            if (id === 'spy') list.innerHTML += `<button class="btn" onclick="sendAction('spy', ${i})">${p.name}</button>`; 
+            if (id === 'theft') list.innerHTML += `<button class="btn btn-thief" onclick="sendAction('trap', 'theft', {targetIdx: ${i}})">${p.name}</button>`; 
+        }}); 
+    }
+    function closeOverlay() { document.querySelectorAll('.overlay').forEach(o => o.style.display = 'none'); }
+</script>
+</body>
+</html>
